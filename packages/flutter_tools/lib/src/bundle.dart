@@ -85,7 +85,7 @@ Future<void> build({
 
     } else if (!fs.file(compilationTraceFilePath).existsSync()) {
       // Be forgiving if compilation trace file is missing.
-      printError('Warning: Ignoring missing compilation training file $compilationTraceFilePath.');
+      printStatus('No compilation trace available. To optimize performance, consider using --train.');
       final File tmp = fs.systemTempDirectory.childFile('flutterEmptyCompilationTrace.txt');
       compilationTraceFilePath = (tmp..createSync(recursive: true)).path;
 
@@ -199,7 +199,7 @@ Future<void> assemble({
   final Map<String, DevFSContent> assetEntries = Map<String, DevFSContent>.from(assetBundle.entries);
   if (kernelContent != null) {
     if (compilationTraceFilePath != null) {
-      final String vmSnapshotData = artifacts.getArtifactPath(Artifact.vmSnapshotData);
+      final String vmSnapshotData = artifacts.getArtifactPath(Artifact.vmSnapshotData, null, buildMode);
       final String isolateSnapshotData = fs.path.join(getBuildDirectory(), _kIsolateSnapshotData);
       final String isolateSnapshotInstr = fs.path.join(getBuildDirectory(), _kIsolateSnapshotInstr);
       assetEntries[_kVMSnapshotData] = DevFSFileContent(fs.file(vmSnapshotData));
