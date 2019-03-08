@@ -55,6 +55,10 @@ enum SelectionChangedCause {
   /// Keyboard-triggered selection changes may be caused by the IME as well as
   /// by accessibility tools (e.g. TalkBack on Android).
   keyboard,
+
+  /// The user used the mouse to change the selection by dragging over a piece
+  /// of text.
+  drag,
 }
 
 /// Signature for the callback that reports when the caret location changes.
@@ -140,6 +144,9 @@ class RenderEditable extends RenderBox {
     ValueNotifier<bool> showCursor,
     bool hasFocus,
     int maxLines = 1,
+    int minLines,
+    bool expands = false,
+    StrutStyle strutStyle,
     Color selectionColor,
     double textScaleFactor = 1.0,
     TextSelection selection,
@@ -160,6 +167,16 @@ class RenderEditable extends RenderBox {
   }) : assert(textAlign != null),
        assert(textDirection != null, 'RenderEditable created without a textDirection.'),
        assert(maxLines == null || maxLines > 0),
+       assert(minLines == null || minLines > 0),
+       assert(
+         (maxLines == null) || (minLines == null) || (maxLines >= minLines),
+         'minLines can\'t be greater than maxLines',
+       ),
+       assert(expands != null),
+       assert(
+         !expands || (maxLines == null && minLines == null),
+         'minLines and maxLines must be null when expands is true.',
+       ),
        assert(textScaleFactor != null),
        assert(offset != null),
        assert(ignorePointer != null),
@@ -174,12 +191,15 @@ class RenderEditable extends RenderBox {
          textDirection: textDirection,
          textScaleFactor: textScaleFactor,
          locale: locale,
+         strutStyle: strutStyle,
        ),
        _cursorColor = cursorColor,
        _backgroundCursorColor = backgroundCursorColor,
        _showCursor = showCursor ?? ValueNotifier<bool>(false),
        _hasFocus = hasFocus ?? false,
        _maxLines = maxLines,
+       _minLines = minLines,
+       _expands = expands,
        _selectionColor = selectionColor,
        _selection = selection,
        _offset = offset,
@@ -413,7 +433,7 @@ class RenderEditable extends RenderBox {
         onSelectionChanged(
           TextSelection(
             baseOffset: _baseOffset,
-            extentOffset: newOffset
+            extentOffset: newOffset,
           ),
           this,
           SelectionChangedCause.keyboard,
@@ -422,7 +442,7 @@ class RenderEditable extends RenderBox {
         onSelectionChanged(
           TextSelection(
             baseOffset: newOffset,
-            extentOffset: _baseOffset
+            extentOffset: _baseOffset,
           ),
           this,
           SelectionChangedCause.keyboard,
@@ -509,12 +529,12 @@ class RenderEditable extends RenderBox {
       textSelectionDelegate.textEditingValue = TextEditingValue(
         text: selection.textBefore(text.text)
           + selection.textAfter(text.text).substring(1),
-        selection: TextSelection.collapsed(offset: selection.start)
+        selection: TextSelection.collapsed(offset: selection.start),
       );
     } else {
       textSelectionDelegate.textEditingValue = TextEditingValue(
         text: selection.textBefore(text.text),
-        selection: TextSelection.collapsed(offset: selection.start)
+        selection: TextSelection.collapsed(offset: selection.start),
       );
     }
   }
@@ -590,6 +610,16 @@ class RenderEditable extends RenderBox {
     if (_textPainter.locale == value)
       return;
     _textPainter.locale = value;
+    markNeedsTextLayout();
+  }
+
+  /// The [StrutStyle] used by the renderer's internal [TextPainter] to
+  /// determine the strut to use.
+  StrutStyle get strutStyle => _textPainter.strutStyle;
+  set strutStyle(StrutStyle value) {
+    if (_textPainter.strutStyle == value)
+      return;
+    _textPainter.strutStyle = value;
     markNeedsTextLayout();
   }
 
@@ -672,6 +702,29 @@ class RenderEditable extends RenderBox {
     if (maxLines == value)
       return;
     _maxLines = value;
+    markNeedsTextLayout();
+  }
+
+  /// {@macro flutter.widgets.editableText.minLines}
+  int get minLines => _minLines;
+  int _minLines;
+  /// The value may be null. If it is not null, then it must be greater than zero.
+  set minLines(int value) {
+    assert(value == null || value > 0);
+    if (minLines == value)
+      return;
+    _minLines = value;
+    markNeedsTextLayout();
+  }
+
+  /// {@macro flutter.widgets.editableText.expands}
+  bool get expands => _expands;
+  bool _expands;
+  set expands(bool value) {
+    assert(value != null);
+    if (expands == value)
+      return;
+    _expands = value;
     markNeedsTextLayout();
   }
 
@@ -1134,8 +1187,28 @@ class RenderEditable extends RenderBox {
   double get preferredLineHeight => _textPainter.preferredLineHeight;
 
   double _preferredHeight(double width) {
-    if (maxLines != null)
+    // Lock height to maxLines if needed
+    final bool lockedMax = maxLines != null && minLines == null;
+    final bool lockedBoth = minLines != null && minLines == maxLines;
+    final bool singleLine = maxLines == 1;
+    if (singleLine || lockedMax || lockedBoth) {
       return preferredLineHeight * maxLines;
+    }
+
+    // Clamp height to minLines or maxLines if needed
+    final bool minLimited = minLines != null && minLines > 1;
+    final bool maxLimited = maxLines != null;
+    if (minLimited || maxLimited) {
+      _layoutText(width);
+      if (minLimited && _textPainter.height < preferredLineHeight * minLines) {
+        return preferredLineHeight * minLines;
+      }
+      if (maxLimited && _textPainter.height > preferredLineHeight * maxLines) {
+        return preferredLineHeight * maxLines;
+      }
+    }
+
+    // Set the height based on the content
     if (width == double.infinity) {
       final String text = _textPainter.text.toPlainText();
       int lines = 1;
@@ -1191,7 +1264,7 @@ class RenderEditable extends RenderBox {
   /// When [ignorePointer] is true, an ancestor widget must respond to tap
   /// down events by calling this method.
   void handleTapDown(TapDownDetails details) {
-    _lastTapDownPosition = details.globalPosition + -_paintOffset;
+    _lastTapDownPosition = details.globalPosition;
   }
   void _handleTapDown(TapDownDetails details) {
     assert(!ignorePointer);
@@ -1223,7 +1296,7 @@ class RenderEditable extends RenderBox {
   }
 
   /// If [ignorePointer] is false (the default) then this method is called by
-  /// the internal gesture recognizer's [LongPressRecognizer.onLongPress]
+  /// the internal gesture recognizer's [LongPressGestureRecognizer.onLongPress]
   /// callback.
   ///
   /// When [ignorePointer] is true, an ancestor widget must respond to long
@@ -1246,20 +1319,36 @@ class RenderEditable extends RenderBox {
   /// If you have a [TextEditingController], it's generally easier to
   /// programmatically manipulate its `value` or `selection` directly.
   /// {@endtemplate}
-  void selectPosition({@required SelectionChangedCause cause}) {
+  void selectPosition({ @required SelectionChangedCause cause }) {
+    selectPositionAt(from: _lastTapDownPosition, cause: cause);
+  }
+
+  /// Select text between the global positions [from] and [to].
+  void selectPositionAt({ @required Offset from, Offset to, @required SelectionChangedCause cause }) {
     assert(cause != null);
+    assert(from != null);
     _layoutText(constraints.maxWidth);
-    assert(_lastTapDownPosition != null);
     if (onSelectionChanged != null) {
-      final TextPosition position = _textPainter.getPositionForOffset(globalToLocal(_lastTapDownPosition));
-      onSelectionChanged(TextSelection.fromPosition(position), this, cause);
+      final TextPosition fromPosition = _textPainter.getPositionForOffset(globalToLocal(from - _paintOffset));
+      final TextPosition toPosition = to == null
+        ? null
+        : _textPainter.getPositionForOffset(globalToLocal(to - _paintOffset));
+      onSelectionChanged(
+        TextSelection(
+          baseOffset: fromPosition.offset,
+          extentOffset: toPosition?.offset ?? fromPosition.offset,
+          affinity: fromPosition.affinity,
+        ),
+        this,
+        cause,
+      );
     }
   }
 
   /// Select a word around the location of the last tap down.
   ///
   /// {@macro flutter.rendering.editable.select}
-  void selectWord({@required SelectionChangedCause cause}) {
+  void selectWord({ @required SelectionChangedCause cause }) {
     selectWordsInRange(from: _lastTapDownPosition, cause: cause);
   }
 
@@ -1269,14 +1358,15 @@ class RenderEditable extends RenderBox {
   /// beginning and end of a word respectively.
   ///
   /// {@macro flutter.rendering.editable.select}
-  void selectWordsInRange({@required Offset from, Offset to, @required SelectionChangedCause cause}) {
+  void selectWordsInRange({ @required Offset from, Offset to, @required SelectionChangedCause cause }) {
     assert(cause != null);
+    assert(from != null);
     _layoutText(constraints.maxWidth);
     if (onSelectionChanged != null) {
-      final TextPosition firstPosition = _textPainter.getPositionForOffset(globalToLocal(from + -_paintOffset));
+      final TextPosition firstPosition = _textPainter.getPositionForOffset(globalToLocal(from - _paintOffset));
       final TextSelection firstWord = _selectWordAtOffset(firstPosition);
       final TextSelection lastWord = to == null ?
-        firstWord : _selectWordAtOffset(_textPainter.getPositionForOffset(globalToLocal(to + -_paintOffset)));
+        firstWord : _selectWordAtOffset(_textPainter.getPositionForOffset(globalToLocal(to - _paintOffset)));
 
       onSelectionChanged(
         TextSelection(
@@ -1291,12 +1381,12 @@ class RenderEditable extends RenderBox {
   /// Move the selection to the beginning or end of a word.
   ///
   /// {@macro flutter.rendering.editable.select}
-  void selectWordEdge({@required SelectionChangedCause cause}) {
+  void selectWordEdge({ @required SelectionChangedCause cause }) {
     assert(cause != null);
     _layoutText(constraints.maxWidth);
     assert(_lastTapDownPosition != null);
     if (onSelectionChanged != null) {
-      final TextPosition position = _textPainter.getPositionForOffset(globalToLocal(_lastTapDownPosition));
+      final TextPosition position = _textPainter.getPositionForOffset(globalToLocal(_lastTapDownPosition - _paintOffset));
       final TextRange word = _textPainter.getWordBoundary(position);
       if (position.offset - word.start <= 1) {
         onSelectionChanged(
@@ -1449,7 +1539,7 @@ class RenderEditable extends RenderBox {
       _caretPrototype.left - sizeAdjustmentX,
       _caretPrototype.top - sizeAdjustmentY,
       _caretPrototype.right + sizeAdjustmentX,
-      _caretPrototype.bottom + sizeAdjustmentY
+      _caretPrototype.bottom + sizeAdjustmentY,
     );
 
     final Rect caretRect = floatingCaretPrototype.shift(effectiveOffset);
@@ -1580,6 +1670,8 @@ class RenderEditable extends RenderBox {
     properties.add(DiagnosticsProperty<Color>('cursorColor', cursorColor));
     properties.add(DiagnosticsProperty<ValueNotifier<bool>>('showCursor', showCursor));
     properties.add(IntProperty('maxLines', maxLines));
+    properties.add(IntProperty('minLines', minLines));
+    properties.add(DiagnosticsProperty<bool>('expands', expands, defaultValue: false));
     properties.add(DiagnosticsProperty<Color>('selectionColor', selectionColor));
     properties.add(DoubleProperty('textScaleFactor', textScaleFactor));
     properties.add(DiagnosticsProperty<Locale>('locale', locale, defaultValue: null));

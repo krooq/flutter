@@ -5,6 +5,7 @@
 import 'dart:async';
 
 import 'package:archive/archive.dart';
+import 'package:bsdiff/bsdiff.dart';
 import 'package:meta/meta.dart';
 
 import '../android/android_sdk.dart';
@@ -111,6 +112,21 @@ Future<GradleProject> _gradleProject() async {
   return _cachedGradleProject;
 }
 
+/// Runs `gradlew dependencies`, ensuring that dependencies are resolved and
+/// potentially downloaded.
+Future<void> checkGradleDependencies() async {
+  final Status progress = logger.startProgress('Ensuring gradle dependencies are up to date...', timeout: kSlowOperation);
+  final FlutterProject flutterProject = await FlutterProject.current();
+  final String gradle = await _ensureGradle(flutterProject);
+  await runCheckedAsync(
+    <String>[gradle, 'dependencies'],
+    workingDirectory: flutterProject.android.hostAppGradleRoot.path,
+    environment: _gradleEnv,
+  );
+  androidSdk.reinitialize();
+  progress.stop();
+}
+
 // Note: Dependencies are resolved and possibly downloaded as a side-effect
 // of calculating the app properties using Gradle. This may take minutes.
 Future<GradleProject> _readGradleProject() async {
@@ -145,7 +161,7 @@ Future<GradleProject> _readGradleProject() async {
     project = GradleProject(
       <String>['debug', 'profile', 'release'],
       <String>[], flutterProject.android.gradleAppOutV1Directory,
-        flutterProject.android.gradleAppBundleOutV1Directory
+        flutterProject.android.gradleAppBundleOutV1Directory,
     );
   }
   status.stop();
@@ -353,11 +369,12 @@ Future<void> _buildGradleProjectV1(FlutterProject project, String gradle) async 
 }
 
 Future<void> _buildGradleProjectV2(
-    FlutterProject flutterProject,
-    String gradle,
-    BuildInfo buildInfo,
-    String target,
-    bool isBuildingBundle) async {
+  FlutterProject flutterProject,
+  String gradle,
+  BuildInfo buildInfo,
+  String target,
+  bool isBuildingBundle,
+) async {
   final GradleProject project = await _gradleProject();
 
   String assembleTask;
@@ -447,7 +464,7 @@ Future<void> _buildGradleProjectV2(
       }
 
       return line;
-    }
+    },
   );
   status.stop();
 
@@ -498,6 +515,7 @@ Future<void> _buildGradleProjectV2(
         throwToolExit('Error: Could not find baseline package ${baselineApkFile.path}.');
 
       printStatus('Found baseline package ${baselineApkFile.path}.');
+      printStatus('Creating dynamic patch...');
       final Archive newApk = ZipDecoder().decodeBytes(apkFile.readAsBytesSync());
       final Archive oldApk = ZipDecoder().decodeBytes(baselineApkFile.readAsBytesSync());
 
@@ -514,12 +532,20 @@ Future<void> _buildGradleProjectV2(
         if (oldFile != null && oldFile.crc32 == newFile.crc32)
           continue;
 
-        // Only allow changes under assets/.
-        if (!newFile.name.startsWith('assets/'))
+        // Only allow certain changes.
+        if (!newFile.name.startsWith('assets/') &&
+            !(buildInfo.usesAot && newFile.name.endsWith('.so')))
           throwToolExit("Error: Dynamic patching doesn't support changes to ${newFile.name}.");
 
-        final String name = fs.path.relative(newFile.name, from: 'assets/');
-        update.addFile(ArchiveFile(name, newFile.content.length, newFile.content));
+        final String name = newFile.name;
+        if (name.contains('_snapshot_') || name.endsWith('.so')) {
+          final List<int> diff = bsdiff(oldFile.content, newFile.content);
+          final int ratio = 100 * diff.length ~/ newFile.content.length;
+          printStatus('Deflated $name by ${ratio == 0 ? 99 : 100 - ratio}%');
+          update.addFile(ArchiveFile(name + '.bzdiff40', diff.length, diff));
+        } else {
+          update.addFile(ArchiveFile(name, newFile.content.length, newFile.content));
+        }
       }
 
       File updateFile;
@@ -567,7 +593,8 @@ Future<void> _buildGradleProjectV2(
 
       updateFile.parent.createSync(recursive: true);
       updateFile.writeAsBytesSync(ZipEncoder().encode(update), flush: true);
-      printStatus('Created dynamic patch ${updateFile.path}.');
+      final String patchSize = getSizeAsMB(updateFile.lengthSync());
+      printStatus('Created dynamic patch ${updateFile.path} ($patchSize).');
     }
   } else {
     final File bundleFile = _findBundleFile(project, buildInfo);
@@ -655,7 +682,7 @@ class GradleProject {
         .trim();
 
     // Extract build types and product flavors.
-    final Set<String> variants = Set<String>();
+    final Set<String> variants = <String>{};
     for (String s in tasks.split('\n')) {
       final Match match = _assembleTaskPattern.matchAsPrefix(s);
       if (match != null) {
@@ -664,8 +691,8 @@ class GradleProject {
           variants.add(variant);
       }
     }
-    final Set<String> buildTypes = Set<String>();
-    final Set<String> productFlavors = Set<String>();
+    final Set<String> buildTypes = <String>{};
+    final Set<String> productFlavors = <String>{};
     for (final String variant1 in variants) {
       for (final String variant2 in variants) {
         if (variant2.startsWith(variant1) && variant2 != variant1) {

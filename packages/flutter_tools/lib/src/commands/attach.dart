@@ -205,13 +205,14 @@ class AttachCommand extends FlutterCommand {
     }
     try {
       final bool useHot = getBuildInfo().isDebug;
-      final FlutterDevice flutterDevice = FlutterDevice(
+      final FlutterDevice flutterDevice = await FlutterDevice.create(
         device,
         trackWidgetCreation: false,
         dillOutputPath: argResults['output-dill'],
         fileSystemRoots: argResults['filesystem-root'],
         fileSystemScheme: argResults['filesystem-scheme'],
         viewFilter: argResults['isolate-filter'],
+        target: argResults['target'],
         targetModel: TargetModel(argResults['target-model']),
       );
       flutterDevice.observatoryUris = <Uri>[ observatoryUri ];
@@ -275,18 +276,19 @@ class AttachCommand extends FlutterCommand {
 }
 
 class HotRunnerFactory {
-  HotRunner build(List<FlutterDevice> devices, {
-      String target,
-      DebuggingOptions debuggingOptions,
-      bool usesTerminalUI = true,
-      bool benchmarkMode = false,
-      File applicationBinary,
-      bool hostIsIde = false,
-      String projectRootPath,
-      String packagesFilePath,
-      String dillOutputPath,
-      bool stayResident = true,
-      bool ipv6 = false,
+  HotRunner build(
+    List<FlutterDevice> devices, {
+    String target,
+    DebuggingOptions debuggingOptions,
+    bool usesTerminalUI = true,
+    bool benchmarkMode = false,
+    File applicationBinary,
+    bool hostIsIde = false,
+    String projectRootPath,
+    String packagesFilePath,
+    String dillOutputPath,
+    bool stayResident = true,
+    bool ipv6 = false,
   }) => HotRunner(
     devices,
     target: target,

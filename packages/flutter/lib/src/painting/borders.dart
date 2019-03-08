@@ -121,7 +121,7 @@ class BorderSide {
   BorderSide copyWith({
     Color color,
     double width,
-    BorderStyle style
+    BorderStyle style,
   }) {
     assert(width == null || width >= 0.0);
     return BorderSide(
@@ -652,7 +652,9 @@ class _CompoundBorder extends ShapeBorder {
 ///  * [Border], which uses this function to paint its border when the border is
 ///    not uniform.
 ///  * [BoxDecoration], which describes its border using the [Border] class.
-void paintBorder(Canvas canvas, Rect rect, {
+void paintBorder(
+  Canvas canvas,
+  Rect rect, {
   BorderSide top = BorderSide.none,
   BorderSide right = BorderSide.none,
   BorderSide bottom = BorderSide.none,
